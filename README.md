@@ -1,0 +1,1 @@
+Use the `init` subcommand (do not forget to run in release) for the first run.

@@ -1,0 +1,11 @@
+etiquettes:
+- name: Japon
+  wikipedia_categories:
+  - Japon
+- name: Vraies sciences
+  wikipedia_categories:
+  - Sciences_exactes
+- name: Informatique
+  wikipedia_categories:
+  - Informatique
+  - Ordinateur
