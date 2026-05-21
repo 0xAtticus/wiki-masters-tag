@@ -73,7 +73,8 @@ async fn main() -> Result<()> {
             Err(_) => {
                 let mut f = std::fs::File::create_new(&args.config_file)?;
                 f.write_all(serde_yaml::to_string(&Config::default())?.as_bytes())?;
-                f
+                f.flush()?;
+                std::fs::File::open(&args.config_file)?
             }
         };
         serde_yaml::from_reader(file)?
