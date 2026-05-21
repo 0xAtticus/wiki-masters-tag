@@ -22,8 +22,44 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Check
+      - name: Extract package name
+        id: extract_name
+        run: |
+          # Extracts the first `name = "..."` from Cargo.toml
+          PACKAGE_NAME=$(awk -F' = ' '/^name/ {gsub(/[" ]/, "", $2); print $2; exit}' Cargo.toml)
+          echo "name=$PACKAGE_NAME" >> $GITHUB_OUTPUT
+        shell: bash
+
+      - name: Build
         run: cargo build --release
+
+      - name: Rename binary (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          BINARY_NAME: ${{ steps.extract_name.outputs.name }}
+        run: mv target/release/${BINARY_NAME} ${BINARY_NAME}-linux-x64
+        shell: bash
+
+      - name: Rename binary (Windows)
+        if: matrix.os == 'windows-latest'
+        env:
+          BINARY_NAME: ${{ steps.extract_name.outputs.name }}
+        run: mv target/release/${BINARY_NAME}.exe ${BINARY_NAME}-windows-x64.exe
+        shell: bash
+
+      - name: Rename binary (macOS ARM64)
+        if: matrix.os == 'macos-26'
+        env:
+          BINARY_NAME: ${{ steps.extract_name.outputs.name }}
+        run: mv target/release/${BINARY_NAME} ${BINARY_NAME}-macos-arm64
+        shell: bash
+
+      - name: Rename binary (macOS x64)
+        if: matrix.os == 'macos-26-intel'
+        env:
+          BINARY_NAME: ${{ steps.extract_name.outputs.name }}
+        run: mv target/release/${BINARY_NAME} ${BINARY_NAME}-macos-x64
+        shell: bash
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -34,3 +70,5 @@ jobs:
       - name: Upload to Release
         uses: softprops/action-gh-release@v3
         if: github.ref_type == 'tag'
+        with:
+          files: ${{ steps.extract_name.outputs.name }}-*
