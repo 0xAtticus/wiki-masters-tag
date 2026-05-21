@@ -18,7 +18,7 @@ use clap::{Parser, Subcommand};
 use hex_color::HexColor;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use reqwest::Url;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::{self, io::AsyncWriteExt};
 use tracing_subscriber::FmtSubscriber;
 
@@ -67,8 +67,16 @@ enum Command {
 async fn main() -> Result<()> {
     let args = App::parse();
     let config: Config = {
-        let f = std::fs::File::open(&args.config_file)?;
-        serde_yaml::from_reader(f)?
+        use std::io::Write;
+        let file = match std::fs::File::open(&args.config_file) {
+            Ok(f) => f,
+            Err(_) => {
+                let mut f = std::fs::File::create_new(&args.config_file)?;
+                f.write_all(serde_yaml::to_string(&Config::default())?.as_bytes())?;
+                f
+            }
+        };
+        serde_yaml::from_reader(file)?
     };
 
     let subscriber = FmtSubscriber::builder()
@@ -483,13 +491,36 @@ async fn tag_card(
     Ok(())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct Config {
     etiquettes: Vec<Etiquette>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 struct Etiquette {
     name: String,
     wikipedia_categories: Vec<String>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            etiquettes: vec![
+                Etiquette {
+                    name: "Mes trucs du Japon".to_string(),
+                    wikipedia_categories: vec![
+                        "Histoire_du_Japon".to_string(),
+                        "Géographie_du_Japon".to_string(),
+                    ],
+                },
+                Etiquette {
+                    name: "La cuisine".to_string(),
+                    wikipedia_categories: vec![
+                        "Préparation_culinaire".to_string(),
+                        "Cuisinier".to_string(),
+                    ],
+                },
+            ],
+        }
+    }
 }

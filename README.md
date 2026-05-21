@@ -22,7 +22,8 @@ Options:
 ```
 
 ## On first run
-Use the `init` subcommand (do not forget to run in release) for the first run.
+Use the `init` subcommand (do not forget to run in release) for the first run to download the wikipedia database.  
+This will create a default `config.yml` file, do not forget to adapt it to your needs.
 
 For reference about the migration:
 ```
