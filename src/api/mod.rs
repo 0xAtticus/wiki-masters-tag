@@ -70,7 +70,6 @@ pub struct AttachTagRequest<'a> {
     pub user_card_id: &'a str,
 }
 
-#[derive(Serialize)]
 pub struct CreateTagRequest<'a> {
     pub name: &'a str,
 }
@@ -180,13 +179,17 @@ impl WikiMasterApi {
 
     pub async fn create_tag<'a>(&self, request: CreateTagRequest<'a>) -> Result<()> {
         let client = reqwest::Client::new();
-        client
+        let response = client
             .post(supabase_url!("tags"))
             .bearer_auth(self.supabase_bearer.to_owned())
             .header("apikey", self.supabase_api_key.to_owned())
-            .json(&request)
+            .json(&json!({
+                "name": request.name,
+                "user_id": self.user_id
+            }))
             .send()
             .await?;
+        tracing::debug!("create tag response: {}",response.text().await?);
         Ok(())
     }
 

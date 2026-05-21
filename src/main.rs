@@ -20,7 +20,6 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use tokio::{self, io::AsyncWriteExt};
-use tracing_subscriber::FmtSubscriber;
 
 const SUPABASE_API_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN5cnhqZXBwanFzeHhqYXlmcnVyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM4ODAzMzksImV4cCI6MjA4OTQ1NjMzOX0.BZluyXygNxuQGDPxFX1zG5i-cqp10CVK-8GGtuak4Rg";
 
@@ -29,8 +28,6 @@ const SUPABASE_API_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJ
 pub struct App {
     #[arg(short, long, default_value = "config.yml")]
     config_file: String,
-    #[arg(long, default_value = "INFO", hide = true)]
-    log_level: String, // TODO ENUM
     #[arg(long, default_value = "./wikipedia_database")]
     database_folder_path: PathBuf,
     #[arg(long)]
@@ -80,11 +77,7 @@ async fn main() -> Result<()> {
         serde_yaml::from_reader(file)?
     };
 
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(tracing::Level::from_str(&args.log_level).unwrap())
-        .finish();
-
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    tracing_subscriber::fmt::init();
 
     if let Command::Init = args.command {
         std::fs::create_dir_all(&args.database_folder_path)?;
@@ -161,6 +154,7 @@ async fn main() -> Result<()> {
             delete_all_tags(api.clone(), &pb).await?;
             let mut new_tags = vec![];
             pb.set_length(etiquettes.len() as u64);
+            pb.set_position(0);
             pb.set_message("Creating tags.");
             for etiquette in etiquettes.iter() {
                 api.create_tag(CreateTagRequest {
@@ -375,7 +369,6 @@ async fn delete_all_tags(api: Arc<WikiMasterApi>, pb: &ProgressBar) -> Result<()
     pb.set_message("Deleting old tags");
     let mut page = 0;
     loop {
-        tracing::info!("Processing page {page}");
         let collection = api.my_collection(page, None).await?;
         if let Some(total) = collection.total {
             pb.set_length(total as u64);
