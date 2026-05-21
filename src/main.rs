@@ -24,13 +24,12 @@ use tracing_subscriber::FmtSubscriber;
 
 const SUPABASE_API_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN5cnhqZXBwanFzeHhqYXlmcnVyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM4ODAzMzksImV4cCI6MjA4OTQ1NjMzOX0.BZluyXygNxuQGDPxFX1zG5i-cqp10CVK-8GGtuak4Rg";
 
-/// Here's my app!
 #[derive(Debug, Parser)]
-#[clap(name = "my-app", version)]
+#[clap(name = "wiki-master-tag", version)]
 pub struct App {
     #[arg(short, long, default_value = "config.yml")]
     config_file: String,
-    #[arg(long, default_value = "INFO")]
+    #[arg(long, default_value = "INFO", hide = true)]
     log_level: String, // TODO ENUM
     #[arg(long, default_value = "./wikipedia_database")]
     database_folder_path: PathBuf,
@@ -44,13 +43,18 @@ pub struct App {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Allows to retag all your collection according to the newest config file. This will remove all previous tags.
     RetagAll,
+    /// Retag only newest untagged cards according to the config file.
     TagNew,
+    /// Allow you to debug why a given card was tagged with a specific tag.
     DryRun {
         #[clap(long, short = 't')]
         page_title: String,
     },
+    /// Needed to be run once to download the wikipedia database.
     Init,
+    /// Send all the cards with the given tag to a given user.
     Trade {
         #[clap(long, short = 'e')]
         etiquette: String,

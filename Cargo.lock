@@ -253,34 +253,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
-name = "cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64",
- "clap",
- "color",
- "flate2",
- "futures",
- "hex_color",
- "indicatif",
- "mediawiki_rest_api",
- "nom 8.0.0",
- "rayon",
- "regex",
- "reqwest 0.13.3",
- "rusqlite",
- "serde",
- "serde_json",
- "serde_yaml",
- "sqlx",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "cmake"
 version = "0.1.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3095,6 +3067,34 @@ checksum = "5d4a4db5077702ca3015d3d02d74974948aba2ad9e12ab7df718ee64ccd7e97d"
 dependencies = [
  "libredox",
  "wasite",
+]
+
+[[package]]
+name = "wiki-masters-tag"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "clap",
+ "color",
+ "flate2",
+ "futures",
+ "hex_color",
+ "indicatif",
+ "mediawiki_rest_api",
+ "nom 8.0.0",
+ "rayon",
+ "regex",
+ "reqwest 0.13.3",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sqlx",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
