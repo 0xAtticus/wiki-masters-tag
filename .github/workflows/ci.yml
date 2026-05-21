@@ -17,11 +17,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Cache dependencies
-        uses: actions-rs/cargo@v1
-        with:
-          command: cache
-
       - name: Check
         uses: actions-rs/cargo@v1
         with:
