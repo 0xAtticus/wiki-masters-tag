@@ -15,9 +15,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Check
-        uses: actions-rs/cargo@v1
-        with:
-          command: check
+        run: cargo check --verbose
