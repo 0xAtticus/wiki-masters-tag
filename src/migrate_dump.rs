@@ -10,6 +10,9 @@ use nom::{
     multi::{many0, separated_list0},
     sequence::{delimited, preceded, separated_pair, terminated},
 };
+use sqlx::sqlite::SqliteConnectOptions;
+use sqlx::sqlite::SqliteJournalMode;
+use std::io::BufRead;
 use std::path::Path;
 
 #[derive(Debug, PartialEq)]
@@ -91,18 +94,55 @@ fn parse_input(input: &str) -> IResult<&str, Vec<Record>> {
     terminated(separated_list0(char(','), parse_record), char(';')).parse(input)
 }
 
+struct LineIterator<'a> {
+    dump: &'a mut (dyn BufRead + Send),
+    internal_buffer: Vec<u8>,
+}
+
+impl<'a> LineIterator<'a> {
+    fn new(dump: &'a mut (dyn BufRead + Send)) -> Self {
+        Self {
+            dump,
+            internal_buffer: Vec::new(),
+        }
+    }
+}
+
+impl<'a> Iterator for LineIterator<'a> {
+    type Item = String;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self
+            .dump
+            .read_until(b'\n', &mut self.internal_buffer)
+            .unwrap()
+            > 0
+        {
+            let line = String::from_utf8_lossy(&self.internal_buffer).into_owned();
+            self.internal_buffer.clear();
+            Some(line)
+        } else {
+            None
+        }
+    }
+}
+
 pub struct LinkTargetMigrator;
 
 impl Migrator for LinkTargetMigrator {
     async fn migrate(
         &self,
-        mut dump: impl std::io::BufRead,
+        dump: &mut (dyn BufRead + Send),
         output: &Path,
         pb: &ProgressBar,
     ) -> Result<()> {
-        let sqlite = sqlx::SqlitePool::connect(output.to_str().unwrap())
-            .await
-            .unwrap();
+        let connect_opts = output
+            .to_str()
+            .unwrap()
+            .parse::<SqliteConnectOptions>()?
+            .journal_mode(SqliteJournalMode::Off)
+            .synchronous(sqlx::sqlite::SqliteSynchronous::Off);
+        let sqlite = sqlx::SqlitePool::connect_with(connect_opts).await.unwrap();
         sqlx::query("DROP TABLE IF EXISTS `linktarget`;")
             .execute(&sqlite)
             .await?;
@@ -156,12 +196,8 @@ impl Migrator for LinkTargetMigrator {
         pb.set_message("Migrating linktarget db");
 
         let mut line_acc = String::new(); // For some reason in this file there is an insert on two lines, so we need to concat them.
-        let mut buf = Vec::new();
-        while dump.read_until(b'\n', &mut buf)? > 0 {
-            let line = String::from_utf8_lossy(&buf).into_owned();
-            buf.clear();
+        for line in LineIterator::new(dump) {
             line_acc.push_str(line.trim());
-            pb.inc(1);
             let prefix = "INSERT INTO `linktarget` VALUES ";
             if !line_acc.ends_with(";") {
                 continue;
@@ -173,6 +209,7 @@ impl Migrator for LinkTargetMigrator {
             let entries = extract_entries(line_acc.strip_prefix(prefix).unwrap())?;
             line_acc.clear();
             for entry in entries {
+                pb.inc(1);
                 sqlx::query(prepared_insert_statement)
                     .bind(entry.lt_id)
                     .bind(entry.lt_namespace)
@@ -181,7 +218,6 @@ impl Migrator for LinkTargetMigrator {
                     .await?;
             }
         }
-
         tx.commit().await?;
 
         sqlx::query("CREATE INDEX lt_id_idx ON `linktarget`(lt_id);")
@@ -197,13 +233,17 @@ pub struct CategoryLinkMigrator;
 impl Migrator for CategoryLinkMigrator {
     async fn migrate(
         &self,
-        mut dump: impl std::io::BufRead,
+        dump: &mut (dyn BufRead + Send),
         output: &Path,
         pb: &ProgressBar,
     ) -> Result<()> {
-        let sqlite = sqlx::SqlitePool::connect(output.to_str().unwrap())
-            .await
-            .unwrap();
+        let connect_opts = output
+            .to_str()
+            .unwrap()
+            .parse::<SqliteConnectOptions>()?
+            .journal_mode(SqliteJournalMode::Off)
+            .synchronous(sqlx::sqlite::SqliteSynchronous::Off);
+        let sqlite = sqlx::SqlitePool::connect_with(connect_opts).await.unwrap();
         sqlx::query("DROP TABLE IF EXISTS `categorylinks`;")
             .execute(&sqlite)
             .await?;
@@ -252,7 +292,7 @@ impl Migrator for CategoryLinkMigrator {
             records.into_iter().map(record_to_row).collect()
         }
 
-        let mut tx = sqlite.begin().await?;
+        let mut transac = sqlite.begin().await?;
         let prepared_insert_statement = "INSERT INTO categorylinks VALUES(?, ?, ?)";
         pb.unset_length();
         pb.set_position(0);
@@ -260,23 +300,20 @@ impl Migrator for CategoryLinkMigrator {
         .template("{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {human_pos}/{human_len} ({per_sec}, {eta})")?);
         pb.set_message("Migrating category link db");
 
-        let mut buf = Vec::new();
-        while dump.read_until(b'\n', &mut buf)? > 0 {
-            let line = String::from_utf8_lossy(&buf).into_owned();
-            buf.clear();
-            pb.inc(1);
+        for line in LineIterator::new(dump) {
             let entries = extract_entries(line.trim());
             for entry in entries {
+                pb.inc(1);
                 sqlx::query(prepared_insert_statement)
                     .bind(entry.cl_from)
                     .bind(entry.cl_type.clone())
                     .bind(entry.cl_target_id)
-                    .execute(&mut *tx)
+                    .execute(&mut *transac)
                     .await?;
             }
         }
 
-        tx.commit().await?;
+        transac.commit().await?;
 
         sqlx::query("CREATE INDEX cl_from_idx ON `categorylinks`(cl_from);")
             .execute(&sqlite)
@@ -291,13 +328,17 @@ pub struct PageMigrator;
 impl Migrator for PageMigrator {
     async fn migrate(
         &self,
-        mut dump: impl std::io::BufRead,
+        dump: &mut (dyn BufRead + Send),
         output: &Path,
         pb: &ProgressBar,
     ) -> Result<()> {
-        let sqlite = sqlx::SqlitePool::connect(output.to_str().unwrap())
-            .await
-            .unwrap();
+        let connect_opts = output
+            .to_str()
+            .unwrap()
+            .parse::<SqliteConnectOptions>()?
+            .journal_mode(SqliteJournalMode::Off)
+            .synchronous(sqlx::sqlite::SqliteSynchronous::Off);
+        let sqlite = sqlx::SqlitePool::connect_with(connect_opts).await.unwrap();
         sqlx::query("DROP TABLE IF EXISTS `page`;")
             .execute(&sqlite)
             .await?;
@@ -353,12 +394,10 @@ impl Migrator for PageMigrator {
         pb.set_style(ProgressStyle::default_bar()
         .template("{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {human_pos}/{human_len} ({per_sec}, {eta})")?);
         pb.set_message("Migrating page db");
-        let mut buf = Vec::new();
-        while dump.read_until(b'\n', &mut buf)? > 0 {
-            let line = String::from_utf8_lossy(&buf).into_owned();
-            buf.clear();
+        for line in LineIterator::new(dump) {
             let entries = extract_entries(line.trim());
             for entry in entries {
+                pb.inc(1);
                 sqlx::query(prepared_insert_statement)
                     .bind(entry.page_id)
                     .bind(entry.page_namespace)
@@ -366,7 +405,6 @@ impl Migrator for PageMigrator {
                     .execute(&mut *tx)
                     .await?;
             }
-            pb.inc(1);
         }
 
         tx.commit().await?;
@@ -382,7 +420,7 @@ impl Migrator for PageMigrator {
 pub trait Migrator {
     async fn migrate(
         &self,
-        dump: impl std::io::BufRead,
+        dump: &mut (dyn BufRead + Send),
         output: &Path,
         pb: &ProgressBar,
     ) -> Result<()>;

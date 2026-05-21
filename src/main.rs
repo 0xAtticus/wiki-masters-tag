@@ -350,9 +350,9 @@ async fn download_and_migrate_db(
     // Decompress the gzip stream on the fly
     let decompressed = flate2::read::GzDecoder::new(cursor);
 
-    let reader = std::io::BufReader::new(decompressed);
+    let mut reader = std::io::BufReader::new(decompressed);
     std::fs::File::create(output_path)?;
-    migrator.migrate(reader, output_path, &pb).await?;
+    migrator.migrate(&mut reader, output_path, &pb).await?;
     // Dropping should clean the file ?
     Ok(())
 }
