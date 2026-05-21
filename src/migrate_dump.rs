@@ -10,11 +10,10 @@ use nom::{
     multi::{many0, separated_list0},
     sequence::{delimited, preceded, separated_pair, terminated},
 };
-use sqlx::sqlite::SqliteConnectOptions;
-use sqlx::sqlite::SqliteJournalMode;
+// Using rusqlite because it is way faster.
+use rusqlite::{Connection, params};
 use std::io::BufRead;
 use std::path::Path;
-
 #[derive(Debug, PartialEq)]
 enum Field {
     Integer(i64),
@@ -62,13 +61,6 @@ fn parse_number(input: &str) -> IResult<&str, i64> {
 }
 
 fn parse_field(input: &str) -> IResult<&str, Field> {
-    // if input.len() > 20 {
-    //     let mut low_bound = 19;
-    //     while !input.is_char_boundary(low_bound) {
-    //         low_bound -= 1;
-    //     }
-    //     println!("field: {}...", &input[..low_bound]);
-    // }
     alt((
         map(tag("NULL"), |_| Field::Null),
         map(parse_float, Field::Float),
@@ -136,28 +128,19 @@ impl Migrator for LinkTargetMigrator {
         output: &Path,
         pb: &ProgressBar,
     ) -> Result<()> {
-        let connect_opts = output
-            .to_str()
-            .unwrap()
-            .parse::<SqliteConnectOptions>()?
-            .journal_mode(SqliteJournalMode::Off)
-            .synchronous(sqlx::sqlite::SqliteSynchronous::Off);
-        let sqlite = sqlx::SqlitePool::connect_with(connect_opts).await.unwrap();
-        sqlx::query("DROP TABLE IF EXISTS `linktarget`;")
-            .execute(&sqlite)
-            .await?;
-        sqlx::query(
+        let mut conn = Connection::open(output.to_str().unwrap())?;
+        conn.pragma_update(None, "journal_mode", "OFF")?;
+        conn.pragma_update(None, "synchronous", "OFF")?;
+        conn.execute("DROP TABLE IF EXISTS `linktarget`;", [])?;
+        conn.execute(
             "CREATE TABLE `linktarget` (
-  `lt_id` integer  NOT NULL,  
-  `lt_namespace` integer NOT NULL,
-  `lt_title` varbinary(255) NOT NULL,
-  PRIMARY KEY (lt_id)
-);
-",
-        )
-        .execute(&sqlite)
-        .await?;
-
+                `lt_id` integer  NOT NULL,  
+                `lt_namespace` integer NOT NULL,
+                `lt_title` varbinary(255) NOT NULL,
+                PRIMARY KEY (lt_id)
+                );",
+            [],
+        )?;
         #[derive(Debug)]
         struct Row {
             lt_id: i64,
@@ -187,42 +170,41 @@ impl Migrator for LinkTargetMigrator {
             Ok(records.into_iter().map(record_to_row).collect())
         }
 
-        let mut tx = sqlite.begin().await?;
-        let prepared_insert_statement = "INSERT INTO linktarget VALUES(?, ?, ?)";
-        pb.unset_length();
-        pb.set_style(ProgressStyle::default_bar()
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare("INSERT INTO linktarget VALUES(?, ?, ?)")?;
+            pb.unset_length();
+            pb.set_style(ProgressStyle::default_bar()
         .template("{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {human_pos}/{human_len} ({per_sec}, {eta})")?);
-        pb.set_position(0);
-        pb.set_message("Migrating linktarget db");
+            pb.set_position(0);
+            pb.set_message("Migrating linktarget db");
 
-        let mut line_acc = String::new(); // For some reason in this file there is an insert on two lines, so we need to concat them.
-        for line in LineIterator::new(dump) {
-            line_acc.push_str(line.trim());
-            let prefix = "INSERT INTO `linktarget` VALUES ";
-            if !line_acc.ends_with(";") {
-                continue;
-            }
-            if !line_acc.starts_with(prefix) {
+            let mut line_acc = String::new(); // For some reason in this file there is an insert on two lines, so we need to concat them.
+            for line in LineIterator::new(dump) {
+                line_acc.push_str(line.trim());
+                let prefix = "INSERT INTO `linktarget` VALUES ";
+                if !line_acc.ends_with(";") {
+                    continue;
+                }
+                if !line_acc.starts_with(prefix) {
+                    line_acc.clear();
+                    continue;
+                }
+                let entries = extract_entries(line_acc.strip_prefix(prefix).unwrap())?;
                 line_acc.clear();
-                continue;
-            }
-            let entries = extract_entries(line_acc.strip_prefix(prefix).unwrap())?;
-            line_acc.clear();
-            for entry in entries {
-                pb.inc(1);
-                sqlx::query(prepared_insert_statement)
-                    .bind(entry.lt_id)
-                    .bind(entry.lt_namespace)
-                    .bind(entry.lt_title.clone())
-                    .execute(&mut *tx)
-                    .await?;
+                for entry in entries {
+                    pb.inc(1);
+                    stmt.execute(params![
+                        entry.lt_id,
+                        entry.lt_namespace,
+                        entry.lt_title.clone()
+                    ])?;
+                }
             }
         }
-        tx.commit().await?;
+        tx.commit()?;
 
-        sqlx::query("CREATE INDEX lt_id_idx ON `linktarget`(lt_id);")
-            .execute(&sqlite)
-            .await?;
+        conn.execute("CREATE INDEX lt_id_idx ON `linktarget`(lt_id);", [])?;
         pb.finish_with_message("LinkTarget migration complete.");
         Ok(())
     }
@@ -237,26 +219,19 @@ impl Migrator for CategoryLinkMigrator {
         output: &Path,
         pb: &ProgressBar,
     ) -> Result<()> {
-        let connect_opts = output
-            .to_str()
-            .unwrap()
-            .parse::<SqliteConnectOptions>()?
-            .journal_mode(SqliteJournalMode::Off)
-            .synchronous(sqlx::sqlite::SqliteSynchronous::Off);
-        let sqlite = sqlx::SqlitePool::connect_with(connect_opts).await.unwrap();
-        sqlx::query("DROP TABLE IF EXISTS `categorylinks`;")
-            .execute(&sqlite)
-            .await?;
-        sqlx::query(
+        let mut conn = Connection::open(output.to_str().unwrap())?;
+        conn.pragma_update(None, "journal_mode", "OFF")?;
+        conn.pragma_update(None, "synchronous", "OFF")?;
+        conn.execute("DROP TABLE IF EXISTS `categorylinks`;", [])?;
+        conn.execute(
             "CREATE TABLE `categorylinks` (
-  `cl_from` int(8) NOT NULL DEFAULT 0,
-  `cl_type` varbinary(255) NOT NULL DEFAULT 'page',
-  `cl_target_id` bigint(20) NOT NULL,
-  PRIMARY KEY (`cl_from`,`cl_target_id`)
-);",
-        )
-        .execute(&sqlite)
-        .await?;
+                `cl_from` int(8) NOT NULL DEFAULT 0,
+                `cl_type` varbinary(255) NOT NULL DEFAULT 'page',
+                `cl_target_id` bigint(20) NOT NULL,
+                PRIMARY KEY (`cl_from`,`cl_target_id`)
+                );",
+            [],
+        )?;
 
         #[derive(Debug)]
         struct Row {
@@ -292,32 +267,27 @@ impl Migrator for CategoryLinkMigrator {
             records.into_iter().map(record_to_row).collect()
         }
 
-        let mut transac = sqlite.begin().await?;
-        let prepared_insert_statement = "INSERT INTO categorylinks VALUES(?, ?, ?)";
-        pb.unset_length();
-        pb.set_position(0);
-        pb.set_style(ProgressStyle::default_bar()
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare("INSERT INTO categorylinks VALUES(?, ?, ?)")?;
+            pb.unset_length();
+            pb.set_position(0);
+            pb.set_style(ProgressStyle::default_bar()
         .template("{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {human_pos}/{human_len} ({per_sec}, {eta})")?);
-        pb.set_message("Migrating category link db");
+            pb.set_message("Migrating category link db");
 
-        for line in LineIterator::new(dump) {
-            let entries = extract_entries(line.trim());
-            for entry in entries {
-                pb.inc(1);
-                sqlx::query(prepared_insert_statement)
-                    .bind(entry.cl_from)
-                    .bind(entry.cl_type.clone())
-                    .bind(entry.cl_target_id)
-                    .execute(&mut *transac)
-                    .await?;
+            for line in LineIterator::new(dump) {
+                let entries = extract_entries(line.trim());
+                for entry in entries {
+                    pb.inc(1);
+                    stmt.execute(params![entry.cl_from, entry.cl_type, entry.cl_target_id])?;
+                }
             }
         }
 
-        transac.commit().await?;
+        tx.commit()?;
 
-        sqlx::query("CREATE INDEX cl_from_idx ON `categorylinks`(cl_from);")
-            .execute(&sqlite)
-            .await?;
+        conn.execute("CREATE INDEX cl_from_idx ON `categorylinks`(cl_from);", [])?;
         pb.finish_with_message("CategoryLinks migration complete.");
         Ok(())
     }
@@ -332,26 +302,19 @@ impl Migrator for PageMigrator {
         output: &Path,
         pb: &ProgressBar,
     ) -> Result<()> {
-        let connect_opts = output
-            .to_str()
-            .unwrap()
-            .parse::<SqliteConnectOptions>()?
-            .journal_mode(SqliteJournalMode::Off)
-            .synchronous(sqlx::sqlite::SqliteSynchronous::Off);
-        let sqlite = sqlx::SqlitePool::connect_with(connect_opts).await.unwrap();
-        sqlx::query("DROP TABLE IF EXISTS `page`;")
-            .execute(&sqlite)
-            .await?;
-        sqlx::query(
+        let mut conn = Connection::open(output.to_str().unwrap())?;
+        conn.pragma_update(None, "journal_mode", "OFF")?;
+        conn.pragma_update(None, "synchronous", "OFF")?;
+        conn.execute("DROP TABLE IF EXISTS `page`;", [])?;
+        conn.execute(
             "CREATE TABLE `page` (
-  `page_id` int(8) NOT NULL,
-  `page_namespace` int(11) NOT NULL DEFAULT 0,
-  `page_title` varbinary(255) NOT NULL DEFAULT '',
-  PRIMARY KEY (`page_id`)
-);",
-        )
-        .execute(&sqlite)
-        .await?;
+                `page_id` int(8) NOT NULL,
+                `page_namespace` int(11) NOT NULL DEFAULT 0,
+                `page_title` varbinary(255) NOT NULL DEFAULT '',
+                PRIMARY KEY (`page_id`)
+            );",
+            [],
+        )?;
 
         #[derive(Debug)]
         struct Row {
@@ -387,31 +350,30 @@ impl Migrator for PageMigrator {
             records.into_iter().map(record_to_row).collect()
         }
 
-        let mut tx = sqlite.begin().await?;
-        let prepared_insert_statement = "INSERT INTO page VALUES(?, ?, ?)";
-        pb.unset_length();
-        pb.set_position(0);
-        pb.set_style(ProgressStyle::default_bar()
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare("INSERT INTO page VALUES(?, ?, ?)")?;
+            pb.unset_length();
+            pb.set_position(0);
+            pb.set_style(ProgressStyle::default_bar()
         .template("{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {human_pos}/{human_len} ({per_sec}, {eta})")?);
-        pb.set_message("Migrating page db");
-        for line in LineIterator::new(dump) {
-            let entries = extract_entries(line.trim());
-            for entry in entries {
-                pb.inc(1);
-                sqlx::query(prepared_insert_statement)
-                    .bind(entry.page_id)
-                    .bind(entry.page_namespace)
-                    .bind(&entry.page_title)
-                    .execute(&mut *tx)
-                    .await?;
+            pb.set_message("Migrating page db");
+            for line in LineIterator::new(dump) {
+                let entries = extract_entries(line.trim());
+                for entry in entries {
+                    pb.inc(1);
+                    stmt.execute(params![
+                        entry.page_id,
+                        entry.page_namespace,
+                        entry.page_title
+                    ])?;
+                }
             }
         }
 
-        tx.commit().await?;
+        tx.commit()?;
 
-        sqlx::query("CREATE INDEX page_title_idx ON `page`(page_title);")
-            .execute(&sqlite)
-            .await?;
+        conn.execute("CREATE INDEX page_title_idx ON `page`(page_title);", [])?;
         pb.finish_with_message("Page migration complete.");
         Ok(())
     }
