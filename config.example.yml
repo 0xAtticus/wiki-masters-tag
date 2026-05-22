@@ -3,13 +3,13 @@ etiquettes:
   allow_sell: false # I want to keep this to myself so I will not trade or sell them
   allow_trade: false
   wikipedia_categories:
-  - Japon
+  - name: Japon
 - name: Vraies sciences
   wikipedia_categories:
-  - Sciences_exactes
+  - name: Sciences_exactes
 - name: Informatique  
   allow_sell: false
   allow_trade: true # I want to keep this for a friend so I will trade them but not sell them
   wikipedia_categories:
-  - Informatique
-  - Ordinateur
+  - name: Informatique
+  - name: Ordinateur

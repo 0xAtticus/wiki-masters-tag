@@ -531,7 +531,11 @@ async fn get_etiquettes_to_apply<'a>(
         for etiquette in etiquettes {
             if etiquette
                 .wikipedia_categories
-                .contains(&category.category_name)
+                .iter()
+                .any(|wikipedia_category| {
+                    wikipedia_category.name == category.category_name
+                        && wikipedia_category.max_path_length >= category.path_to_category.len()
+                })
             {
                 if best_path_length == usize::MAX {
                     best_path_length = category.path_to_category.len();
@@ -595,9 +599,20 @@ struct Config {
 #[derive(Deserialize, Serialize, Debug)]
 struct Etiquette {
     name: String,
-    wikipedia_categories: Vec<String>,
+    wikipedia_categories: Vec<WikipediaCategory>,
     allow_trade: bool,
     allow_sell: bool,
+}
+
+fn default_max_path_length() -> usize {
+    100
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+struct WikipediaCategory {
+    name: String,
+    #[serde(default = "default_max_path_length")]
+    max_path_length: usize,
 }
 
 impl Default for Config {
@@ -607,8 +622,14 @@ impl Default for Config {
                 Etiquette {
                     name: "Mes trucs du Japon".to_string(),
                     wikipedia_categories: vec![
-                        "Histoire_du_Japon".to_string(),
-                        "Géographie_du_Japon".to_string(),
+                        WikipediaCategory {
+                            name: "Histoire_du_Japon".to_string(),
+                            max_path_length: 100,
+                        },
+                        WikipediaCategory {
+                            name: "Géographie_du_Japon".to_string(),
+                            max_path_length: 100,
+                        },
                     ],
                     allow_sell: false,
                     allow_trade: false,
@@ -616,8 +637,14 @@ impl Default for Config {
                 Etiquette {
                     name: "La cuisine".to_string(),
                     wikipedia_categories: vec![
-                        "Préparation_culinaire".to_string(),
-                        "Cuisinier".to_string(),
+                        WikipediaCategory {
+                            name: "Préparation_culinaire".to_string(),
+                            max_path_length: 100,
+                        },
+                        WikipediaCategory {
+                            name: "Cuisinier".to_string(),
+                            max_path_length: 100,
+                        },
                     ],
                     allow_trade: true,
                     allow_sell: false,
