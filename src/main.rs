@@ -201,6 +201,7 @@ async fn main() -> Result<()> {
             let tags = Arc::new(tags);
             let mut page: usize = 0;
             pb.set_message("Tagging cards");
+            pb.set_position(0);
             loop {
                 let collection = api.my_collection(page, None).await?;
                 if let Some(total) = collection.total {
@@ -535,6 +536,11 @@ async fn get_etiquettes_to_apply<'a>(
                 .any(|wikipedia_category| {
                     wikipedia_category.name == category.category_name
                         && wikipedia_category.max_path_length >= category.path_to_category.len()
+                        && !category.path_to_category.iter().any(|category_in_path| {
+                            wikipedia_category
+                                .forbidden_category_in_path
+                                .contains(category_in_path)
+                        })
                 })
             {
                 if best_path_length == usize::MAX {
@@ -613,6 +619,8 @@ struct WikipediaCategory {
     name: String,
     #[serde(default = "default_max_path_length")]
     max_path_length: usize,
+    #[serde(default)]
+    forbidden_category_in_path: Vec<String>,
 }
 
 impl Default for Config {
@@ -625,10 +633,12 @@ impl Default for Config {
                         WikipediaCategory {
                             name: "Histoire_du_Japon".to_string(),
                             max_path_length: 100,
+                            forbidden_category_in_path: vec![],
                         },
                         WikipediaCategory {
                             name: "Géographie_du_Japon".to_string(),
                             max_path_length: 100,
+                            forbidden_category_in_path: vec![],
                         },
                     ],
                     allow_sell: false,
@@ -640,10 +650,12 @@ impl Default for Config {
                         WikipediaCategory {
                             name: "Préparation_culinaire".to_string(),
                             max_path_length: 100,
+                            forbidden_category_in_path: vec![],
                         },
                         WikipediaCategory {
                             name: "Cuisinier".to_string(),
                             max_path_length: 100,
+                            forbidden_category_in_path: vec![],
                         },
                     ],
                     allow_trade: true,
