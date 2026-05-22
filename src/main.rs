@@ -6,8 +6,8 @@ use std::{path::PathBuf, str::FromStr, sync::Arc};
 
 use crate::{
     api::{
-        AttachTagRequest, Card, CollectedCard, CreateTagRequest, DeleteTagFromCardRequest,
-        DeleteTagRequest, SetTagColorRequest, Tag, User,
+        AttachTagRequest, Card, CardRarity, CollectedCard, CreateTagRequest,
+        DeleteTagFromCardRequest, DeleteTagRequest, SetTagColorRequest, Tag, User,
     },
     migrate_dump::{CategoryLinkMigrator, LinkTargetMigrator, Migrator, PageMigrator},
     wikipedia::{CategoryIterator, WikipediaRestApi},
@@ -17,6 +17,7 @@ use api::WikiMasterApi;
 use clap::{Parser, Subcommand};
 use hex_color::HexColor;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use rand::seq::IndexedRandom;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use tokio::{self, io::AsyncWriteExt};
@@ -57,6 +58,28 @@ enum Command {
         etiquette: String,
         #[clap(long, short = 'u')]
         user: String,
+    },
+    /// Allow you to sell random cards according to defined prices.
+    Sell {
+        #[clap(long, default_value_t = 1500)]
+        l_price: usize,
+        #[clap(long, default_value_t = 300)]
+        ur_price: usize,
+        #[clap(long, default_value_t = 300)]
+        sr_price: usize,
+        #[clap(long, default_value_t = 100)]
+        r_price: usize,
+        #[clap(long, default_value_t = 50)]
+        pc_price: usize,
+        #[clap(long, default_value_t = 50)]
+        c_price: usize,
+        #[clap(long, short = 'd', default_value_t = 10)]
+        duration_minutes: usize,
+        /// Useful parameter in you want to avoid selling low rarity cards that will not sell, and you want to keep to increase your card number.
+        /// Inclusive.
+        #[clap(long, default_value_t = CardRarity::R)]
+        #[arg(value_enum)]
+        minimum_rarity: CardRarity,
     },
 }
 
@@ -276,6 +299,7 @@ async fn main() -> Result<()> {
                         id: "fake".to_string(),
                         wikipedia_url: "fake".to_string(),
                         wikipedia_title: page_title,
+                        rarity: api::CardRarity::C,
                     },
                 },
                 &tags,
@@ -299,14 +323,28 @@ async fn main() -> Result<()> {
                 .expect("Could not find friend");
             let mut all_cards = vec![];
             let mut page = 0;
+            let is_tradeable = |card: &CollectedCard| {
+                !card.tags.iter().any(|tag| {
+                    etiquettes
+                        .iter()
+                        .any(|e| e.name == tag.name && !e.allow_trade)
+                })
+            };
+            let pb = ProgressBar::no_length();
+            pb.set_style(ProgressStyle::default_bar()
+                .template("{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {human_pos}/{human_len} ({per_sec}, {eta})")?);
             loop {
-                tracing::info!("Processing page {page}");
                 let collection = api.my_collection(page, Some(&etiquette.id)).await?;
+
+                if let Some(total) = collection.total {
+                    pb.set_length(total as u64);
+                }
                 let cards_count = collection.collection.len();
-                all_cards.extend(collection.collection.into_iter());
+                all_cards.extend(collection.collection.into_iter().filter(is_tradeable));
                 if cards_count != 50 {
                     break;
                 }
+                pb.inc(cards_count as u64);
                 page += 1;
             }
 
@@ -320,6 +358,70 @@ async fn main() -> Result<()> {
                     &user.id,
                 )
                 .await?;
+            }
+        }
+        Command::Sell {
+            duration_minutes,
+            l_price,
+            ur_price,
+            sr_price,
+            r_price,
+            pc_price,
+            c_price,
+            minimum_rarity,
+        } => {
+            let mut all_cards = vec![];
+            let mut page = 0;
+            let is_sellable = |card: &CollectedCard| {
+                !card.tags.iter().any(|tag| {
+                    etiquettes
+                        .iter()
+                        .any(|e| e.name == tag.name && !e.allow_sell)
+                })
+            };
+            let pb = ProgressBar::no_length();
+            pb.set_message("Fetching all cards");
+            pb.set_style(ProgressStyle::default_bar()
+                .template("{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {human_pos}/{human_len} ({per_sec}, {eta})")?);
+            loop {
+                // TODO: Could be faster by requesting collection ordered by rarity and stopping when we reach quality < minimum_rarity`.`
+                let collection = api.my_collection(page, None).await?;
+
+                if let Some(total) = collection.total {
+                    pb.set_length(total as u64);
+                }
+                let cards_count = collection.collection.len();
+                all_cards.extend(
+                    collection
+                        .collection
+                        .into_iter()
+                        .filter(is_sellable)
+                        .filter(|c| c.card.rarity <= minimum_rarity),
+                );
+                if cards_count != 50 {
+                    break;
+                }
+                pb.inc(cards_count as u64);
+                page += 1;
+            }
+
+            pb.reset();
+            pb.set_message("Selling cards");
+            let n_cards_to_sell = 5;
+            pb.set_length(n_cards_to_sell as u64);
+            let to_sell = all_cards.sample(&mut rand::rng(), n_cards_to_sell);
+            for card in to_sell {
+                let price = match card.card.rarity {
+                    api::CardRarity::L => l_price,
+                    api::CardRarity::UR => ur_price,
+                    api::CardRarity::SR => sr_price,
+                    api::CardRarity::R => r_price,
+                    api::CardRarity::PC => pc_price,
+                    api::CardRarity::C => c_price,
+                };
+                api.sell_card(&card.card.id, duration_minutes, price)
+                    .await?;
+                pb.inc(1);
             }
         }
         Command::Init => {
@@ -494,6 +596,8 @@ struct Config {
 struct Etiquette {
     name: String,
     wikipedia_categories: Vec<String>,
+    allow_trade: bool,
+    allow_sell: bool,
 }
 
 impl Default for Config {
@@ -506,6 +610,8 @@ impl Default for Config {
                         "Histoire_du_Japon".to_string(),
                         "Géographie_du_Japon".to_string(),
                     ],
+                    allow_sell: false,
+                    allow_trade: false,
                 },
                 Etiquette {
                     name: "La cuisine".to_string(),
@@ -513,6 +619,8 @@ impl Default for Config {
                         "Préparation_culinaire".to_string(),
                         "Cuisinier".to_string(),
                     ],
+                    allow_trade: true,
+                    allow_sell: false,
                 },
             ],
         }

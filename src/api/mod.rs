@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 use anyhow::Result;
 use base64::prelude::*;
 use hex_color::HexColor;
@@ -12,6 +14,31 @@ pub struct Card {
     pub id: String,
     pub wikipedia_url: String, // flemme
     pub wikipedia_title: String,
+    pub rarity: CardRarity,
+}
+
+#[derive(Deserialize, Debug, clap::ValueEnum, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub enum CardRarity {
+    L,
+    UR,
+    SR,
+    R,
+    PC,
+    C,
+}
+
+impl Display for CardRarity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            CardRarity::L => "L",
+            CardRarity::UR => "UR",
+            CardRarity::SR => "SR",
+            CardRarity::R => "R",
+            CardRarity::PC => "PC",
+            CardRarity::C => "C",
+        };
+        write!(f, "{}", s)
+    }
 }
 
 #[allow(dead_code)]
@@ -189,7 +216,7 @@ impl WikiMasterApi {
             }))
             .send()
             .await?;
-        tracing::debug!("create tag response: {}",response.text().await?);
+        tracing::debug!("create tag response: {}", response.text().await?);
         Ok(())
     }
 
@@ -334,6 +361,26 @@ impl WikiMasterApi {
                     })
                     .collect(),
             })
+            .send()
+            .await?;
+        Ok(())
+    }
+
+    pub async fn sell_card(
+        &self,
+        card_id: &str,
+        duration_minutes: usize,
+        price: usize,
+    ) -> Result<()> {
+        let client = reqwest::Client::new();
+        client
+            .post(api_url!("marketplace"))
+            .header(header::COOKIE, &self.app_cookie)
+            .json(&json!({
+                "base_amount": price,
+                "duration_minutes": duration_minutes,
+                "card_id": card_id
+            }))
             .send()
             .await?;
         Ok(())
