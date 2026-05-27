@@ -1,14 +1,18 @@
 mod api;
+mod local_state;
 mod migrate_dump;
 mod wikipedia;
 
-use std::{path::PathBuf, str::FromStr, sync::Arc};
+use std::{
+    collections::HashSet, path::PathBuf, str::FromStr, sync::Arc, time::Duration,
+};
 
 use crate::{
     api::{
-        AttachTagRequest, Card, CardRarity, CollectedCard, CreateTagRequest,
+        AttachTagRequest, Card, CardRarity, CollectedCard, CollectionResponse, CreateTagRequest,
         DeleteTagFromCardRequest, DeleteTagRequest, SetTagColorRequest, Tag, User,
     },
+    local_state::{GetUserResult, LocalState, LocalUser},
     migrate_dump::{CategoryLinkMigrator, LinkTargetMigrator, Migrator, PageMigrator},
     wikipedia::{CategoryIterator, WikipediaRestApi},
 };
@@ -17,10 +21,12 @@ use api::WikiMasterApi;
 use clap::{Parser, Subcommand};
 use hex_color::HexColor;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use itertools::Itertools;
 use rand::seq::IndexedRandom;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use tokio::{self, io::AsyncWriteExt};
+use std::sync::Mutex;
+use tokio::{self, io::AsyncWriteExt, sync::RwLock, sync::Semaphore};
 
 const SUPABASE_API_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImN5cnhqZXBwanFzeHhqYXlmcnVyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM4ODAzMzksImV4cCI6MjA4OTQ1NjMzOX0.BZluyXygNxuQGDPxFX1zG5i-cqp10CVK-8GGtuak4Rg";
 
@@ -81,6 +87,13 @@ enum Command {
         #[arg(value_enum)]
         minimum_rarity: CardRarity,
     },
+    /// Search for the owner of a card. The list of user is obtained using the db create by `Command::FetchAllUsers`.
+    Search {
+        #[clap(long)]
+        card_id: String,
+    },
+    // Download all users into a local sqlite database.
+    FetchAllUsers,
 }
 
 #[tokio::main]
@@ -99,6 +112,8 @@ async fn main() -> Result<()> {
         };
         serde_yaml::from_reader(file)?
     };
+
+    let local_state = Arc::new(local_state::LocalState::new().await);
 
     tracing_subscriber::fmt::init();
 
@@ -425,6 +440,98 @@ async fn main() -> Result<()> {
                 pb.inc(1);
             }
         }
+        Command::Search { card_id } => {
+            let card = Arc::new(api.get_card(&card_id).await?);
+            let users = local_state.users.list_users().await?;
+            let pb = ProgressBar::new(users.len() as u64);
+            pb.set_message("Fetching all cards");
+            pb.set_style(ProgressStyle::default_bar()
+                .template("{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {human_pos}/{human_len} ({per_sec}, {eta})")?);
+            let pb = Arc::new(pb);
+            let owners = Arc::new(Mutex::new(vec![]));
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<User>();
+
+            let writer_handle = tokio::spawn(async move {
+                for user in users {
+                    let forbidden_chars = ['/', '#', '?'];
+                    if forbidden_chars.iter().any(|c| user.name.contains(*c)) {
+                        // api is bugged
+                        continue;
+                    }
+                    tx.send(user).unwrap();
+                }
+            });
+            let semaphore: Arc<Semaphore> = Arc::new(Semaphore::new(128));
+            let mut handles: Vec<tokio::task::JoinHandle<anyhow::Result<_>>> = Vec::new();
+
+            while let Some(user) = rx.recv().await {
+                let api = api.clone();
+                let owners = owners.clone();
+                let pb = pb.clone();
+                let semaphore = semaphore.clone();
+                let card = card.clone();
+                handles.push(tokio::spawn(async move {
+                    let _permit = semaphore.acquire().await.unwrap();
+                    let mut page = 0;
+                    loop {
+                        // The app is too slow and timeouts if we actually search for the card, so we have to manually look at all the pages.
+                        let mut failure_count = 0;
+                        let collection = loop {
+                            let r = api.user_collection(&user.name, page, None).await;
+                            match r {
+                                Ok(page) => {
+                                    break page;
+                                }
+                                Err(e) => {
+                                    failure_count += 1;
+                                    if failure_count > 6 {
+                                        tracing::info!(
+                                            "Get collection: {} failures for {} page {}: {e}",
+                                            failure_count,
+                                            user.name,
+                                            page
+                                        );
+                                    }
+                                    tokio::time::sleep(Duration::from_secs(10)).await;
+                                }
+                            }
+                        };
+                        page += 1;
+                        if let CollectionResponse::Public { collection } = collection {
+                            if collection
+                                .collection
+                                .iter()
+                                .any(|collected_card| collected_card.card.id == card.id)
+                            {
+                                pb.set_message(format!("User {} has card !", user.name));
+                                owners.lock().unwrap().push(user.name);
+                                break;
+                            }
+                            if collection.collection.len() < 50 {
+                                break;
+                            }
+                            if collection.collection.last().unwrap().card.rarity > card.rarity {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    pb.inc(1);
+                    Ok(())
+                }));
+            }
+            writer_handle.await?;
+            for handle in handles {
+                handle.await??;
+            }
+            pb.finish_and_clear();
+            let owners = owners.lock().unwrap().clone();
+            tracing::info!("Found the following users with the card: {owners:?}")
+        }
+        Command::FetchAllUsers => {
+            refresh_users_local_state(api, local_state).await?;
+        }
         Command::Init => {
             unreachable!("This case is catched before.")
         }
@@ -465,6 +572,219 @@ async fn download_and_migrate_db(
     migrator.migrate(&mut reader, output_path, &pb).await?;
     // Dropping should clean the file ?
     Ok(())
+}
+
+async fn refresh_users_local_state(
+    api: Arc<WikiMasterApi>,
+    local_state: Arc<LocalState>,
+) -> Result<usize> {
+    let added_users = 0usize;
+    let fully_explored = Arc::new(RwLock::new(Vec::new())); // Just another layer of cache over the LocalState for faster responses.
+    /// Allow to filter out unused chars in usernames, and greatly speed up the rest of the process.
+    async fn get_char_shortlist(api: Arc<WikiMasterApi>) -> Result<Vec<char>> {
+        let mut result = HashSet::new();
+        let mut handles = Vec::new();
+
+        let semaphore: Arc<Semaphore> = Arc::new(Semaphore::new(64));
+        for c in 32..=u8::MAX {
+            let c = c as char;
+            let semaphore = semaphore.clone();
+            let api = api.clone();
+            let handle = tokio::spawn(async move {
+                let _permit = semaphore.acquire().await.unwrap();
+                let users_prefixed = api.search_users(&format!("{c}_")).await.unwrap();
+                let users_suffixed = api.search_users(&format!("_{c}")).await.unwrap();
+                !(users_prefixed.is_empty() && users_suffixed.is_empty())
+            });
+            handles.push((c as char, handle));
+        }
+
+        for (c, handle) in handles {
+            if handle.await? {
+                result.insert(c.to_ascii_lowercase());
+            }
+        }
+        Ok(result
+            .into_iter()
+            .filter(|c| *c != '\\' && *c != '*' && *c != '%')
+            .collect())
+    }
+
+    async fn search_prefix_inner(api: &WikiMasterApi, prefix: String) -> Result<Vec<User>> {
+        tracing::info!("prefix: {prefix}",);
+
+        let mut users = vec![];
+        let mut failure_count = 0;
+        loop {
+            match api.search_users(&prefix).await {
+                Err(e) => {
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    failure_count += 1;
+                    tracing::info!("Search: {} failures for {prefix}: {e}", failure_count);
+                }
+                Ok(u) => {
+                    users = u;
+                    break;
+                }
+            }
+        }
+        Ok(users)
+    }
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let mut handles = Vec::new();
+    tracing::info!("Creating character shorlist");
+    let char_shortlist = Arc::new(get_char_shortlist(api.clone()).await?);
+    tracing::info!("Got char shortlist: {char_shortlist:?}");
+    {
+        let char_shortlist = char_shortlist.clone();
+
+        let tx = tx.clone();
+        let handle = tokio::spawn(async move {
+            for (c1, c2) in char_shortlist
+                .iter()
+                .cartesian_product(char_shortlist.iter())
+            {
+                let mut p = String::new();
+                if *c1 == '_' {
+                    p.push_str("\\_")
+                } else {
+                    p.push(*c1);
+                }
+                if *c2 == '_' {
+                    p.push_str("\\_")
+                } else {
+                    p.push(*c2);
+                }
+                tx.send(p).unwrap();
+            }
+        });
+        handles.push(handle);
+    }
+    let semaphore: Arc<Semaphore> = Arc::new(Semaphore::new(128));
+
+    let mut handles = vec![];
+    while let Some(prefix) = rx.recv().await {
+        if &prefix == ".." {
+            continue;
+        }
+        let tx = tx.clone();
+        let semaphore = semaphore.clone();
+        let char_shortlist = char_shortlist.clone();
+        let api = api.clone();
+        let local_state = local_state.clone();
+        let fully_explored = fully_explored.clone();
+        let handle = tokio::spawn(async move {
+            if fully_explored
+                .read()
+                .await
+                .iter()
+                .any(|fully_explored_prefix| prefix.contains(fully_explored_prefix))
+            {
+                tracing::info!("Skip {}", prefix);
+                return;
+            }
+            let prefix_count: Option<i64> = local_state.users.get_prefix(&prefix).await.unwrap();
+            let users_count = if let Some(prefix_count) = prefix_count {
+                if prefix_count < 10 {
+                    // Assume that if a prefix is in the cache, we already fetched the users
+                    fully_explored.write().await.push(prefix);
+                    return;
+                }
+                prefix_count
+            } else {
+                let _permit = semaphore.acquire().await.unwrap();
+
+                let users = search_prefix_inner(&api, prefix.clone()).await.unwrap();
+
+                local_state
+                    .users
+                    .store_prefix(&prefix, users.len() as i64)
+                    .await
+                    .unwrap();
+                users.len() as i64
+            };
+            // In this case, we need to dive deeper
+            if users_count >= 10 {
+                // Check if there is a user named like this prefix
+                let prefix_underscore = &prefix.replace("\\_", "_");
+                match local_state
+                    .users
+                    .get_user_by_name(&prefix_underscore)
+                    .await
+                    .unwrap()
+                {
+                    GetUserResult::CacheMiss => {
+                        let _permit = semaphore.acquire().await.unwrap();
+                        let mut failure_count = 0;
+                        let user = loop {
+                            let r = api.get_user(&prefix_underscore).await;
+                            match r {
+                                Ok(user) => {
+                                    break user;
+                                }
+                                Err(e) => {
+                                    failure_count += 1;
+                                    tracing::info!(
+                                        "Get user: {} failures for {prefix_underscore}: {e}",
+                                        failure_count
+                                    );
+                                    tokio::time::sleep(Duration::from_secs(10)).await;
+                                }
+                            }
+                        };
+                        let user_to_store = match user {
+                            None => LocalUser {
+                                id: None,
+                                name: prefix_underscore.clone(),
+                            },
+                            Some(user) => LocalUser {
+                                id: Some(user.id),
+                                name: user.name,
+                            },
+                        };
+                        local_state.users.store_user(user_to_store).await.unwrap()
+                    }
+                    _ => {}
+                }
+                for c in char_shortlist.iter() {
+                    let mut p = prefix.clone();
+                    if *c == '_' {
+                        p.push_str("\\_")
+                    } else {
+                        p.push(*c);
+                    }
+                    tx.send(p).unwrap();
+                }
+            } else if users_count > 0 {
+                let users = {
+                    let _permit = semaphore.acquire().await.unwrap();
+                    search_prefix_inner(&api, prefix.clone()).await.unwrap()
+                };
+
+                for user in users {
+                    local_state
+                        .users
+                        .store_user(LocalUser {
+                            id: Some(user.id),
+                            name: user.name,
+                        })
+                        .await
+                        .unwrap();
+                }
+                fully_explored.write().await.push(prefix);
+            } else {
+                fully_explored.write().await.push(prefix);
+            }
+        });
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        handle.await?;
+    }
+
+    Ok(added_users)
 }
 
 async fn delete_all_tags(api: Arc<WikiMasterApi>, pb: &ProgressBar) -> Result<()> {

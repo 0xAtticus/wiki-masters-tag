@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 reqwest = { version = "0.13", features = ["json", "stream"] }
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "sync"] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 anyhow = "1.0.102"
@@ -27,3 +27,5 @@ tokio-util = "0.7.18"
 indicatif = "0.18.4"
 rayon = "1.12.0"
 rand = "0.10.1"
+chrono = { version = "0.4.44", features = ["serde"]}
+itertools = "0.14.0"
